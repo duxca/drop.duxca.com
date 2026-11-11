@@ -1,0 +1,67 @@
+name: Deploy to duxca VM
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-duxca-vm
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-unknown-linux-musl
+    - run: cargo test --locked
+    # duxca is Debian (glibc 2.36); a binary built against a newer glibc
+    # will not run there, so the deployable artifact is musl-static.
+    - run: cargo build --release --locked --target x86_64-unknown-linux-musl
+    - name: Check the binary is static
+      run: |
+        ldd target/x86_64-unknown-linux-musl/release/drop 2>&1 | grep -q "statically linked"
+    - name: Stage
+      run: |
+        umask 077
+        mkdir -p stage
+        cp target/x86_64-unknown-linux-musl/release/drop deploy/drop.service deploy/install.sh stage/
+    - name: Install cloudflared
+      run: |
+        curl -fsSL -o /tmp/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+        sudo install -m 755 /tmp/cloudflared /usr/local/bin/cloudflared
+        cloudflared --version
+    - name: Ship and install
+      env:
+        SSH_KEY: ${{ secrets.DUXCA_SSH_KEY }}
+        TUNNEL_SERVICE_TOKEN_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+        TUNNEL_SERVICE_TOKEN_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+      run: |
+        install -d -m 700 ~/.ssh
+        printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+        printf 'Host ssh.duxca.com\n  ProxyCommand cloudflared access ssh --hostname %%h\n  BatchMode yes\n  StrictHostKeyChecking accept-new\n' > ~/.ssh/config
+        SSH="ssh legokichi@ssh.duxca.com"
+        D=/tmp/drop-deploy-${GITHUB_RUN_ID}
+        $SSH "rm -rf $D && mkdir -m 700 $D"
+        scp stage/* legokichi@ssh.duxca.com:$D/
+        $SSH "sudo bash $D/install.sh $D; rc=\$?; rm -rf $D; exit \$rc"
+    - name: Public check
+      run: |
+        code() { curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$@" || true; }
+        for i in $(seq 12); do
+          root=$(code https://drop.duxca.com/)
+          unknown=$(code https://drop.duxca.com/AAAAAAAAAAAAAAAAAAAAAA)
+          echo "try $i: GET /=$root GET /<unknown>=$unknown"
+          if [ "$root" = 404 ] && [ "$unknown" = 404 ]; then exit 0; fi
+          sleep 5
+        done
+        exit 1
