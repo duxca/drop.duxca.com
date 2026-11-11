@@ -1,0 +1,52 @@
+# drop の systemd unit（汎用サンプル）。install.sh が /etc/systemd/system/ に置く。
+# 待ち受けは両方 loopback。公開ポートだけを nginx から中継し、admin ポートは中継しない。
+# 設定を変えるときは /etc/drop/runtime.env に DROP_* を書く（README の設定一覧を参照）。秘密は不要。
+# 再起動すると預かり中のドロップは全部消える（仕様）。
+
+[Unit]
+Description=drop - single-use in-memory dead drop
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+ExecStart=/opt/drop/bin/drop
+Environment=DROP_PUBLIC_ADDR=127.0.0.1:8470
+Environment=DROP_ADMIN_ADDR=127.0.0.1:8471
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/drop/runtime.env
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=10
+
+# 本文はメモリにしか置かない。swap とコアダンプでディスクに出さない。
+MemoryMax=64M
+MemorySwapMax=0
+LimitCORE=0
+
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
