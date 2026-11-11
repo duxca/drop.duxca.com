@@ -200,7 +200,7 @@ async fn full_flow_issue_show_submit_take() {
     assert_eq!(form.content_type(), "text/html; charset=utf-8");
     assert!(form.body.contains(r#"name="text""#));
     assert!(form.body.contains(r#"maxlength="1024""#));
-    assert!(form.body.contains(&format!(r#"action="/{token}""#)));
+    assert!(form.body.contains(&format!(r#"action="{token}""#)));
     assert!(form.body.contains(r#"method="post""#));
     assert!(!form.body.contains("<script"));
     assert_security_headers(&form);

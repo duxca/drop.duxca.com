@@ -153,7 +153,7 @@ const RECEIVED_PAGE: &str = r#"<!doctype html>
 "#;
 
 fn form_page(token: &Token) -> String {
-    let action = escape_html(&format!("/{}", token.encode()));
+    let action = escape_html(&token.encode());
     format!(
         r#"<!doctype html>
 <html lang="ja">
