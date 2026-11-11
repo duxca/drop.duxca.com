@@ -12,9 +12,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           components: clippy, rustfmt
       - name: Format
         run: cargo fmt --check
@@ -31,9 +32,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: x86_64-unknown-linux-musl
       # duxca is Debian (glibc 2.36) while the usual build hosts are newer,
       # so the deployable binary must be statically linked against musl.
@@ -43,7 +45,7 @@ jobs:
         run: |
           file target/x86_64-unknown-linux-musl/release/drop
           ldd target/x86_64-unknown-linux-musl/release/drop 2>&1 | grep -q "statically linked"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: drop-x86_64-unknown-linux-musl
           path: target/x86_64-unknown-linux-musl/release/drop
