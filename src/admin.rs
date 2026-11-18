@@ -61,11 +61,11 @@ fn is_loopback_host(value: &str) -> bool {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct IssueRequest {
+pub(crate) struct IssueRequest {
     #[serde(default)]
-    text: Option<String>,
+    pub(crate) text: Option<String>,
     #[serde(default)]
-    ttl_secs: Option<u64>,
+    pub(crate) ttl_secs: Option<u64>,
 }
 
 #[derive(serde::Serialize)]
@@ -84,6 +84,11 @@ async fn issue(
         // serde のエラー文は入力値を含みうるので返さない
         Err(rejection) => return plain(rejection.status(), "invalid request\n"),
     };
+    issue_drop(&state, request)
+}
+
+/// 発行の本体。loopback admin と遠隔 admin（公開側の認証付き発行）で共有する。
+pub(crate) fn issue_drop(state: &AppState, request: IssueRequest) -> Response {
     let prefilled = request.text.is_some();
     let issued = state
         .store()

@@ -31,6 +31,10 @@ VM 側                         drop                         ブラウザ側
 逆向き（VM 側からブラウザ側へ渡す）ときは、admin 発行時に `text` を先入れし、
 受け手に `https://drop.duxca.com/<token>?take=1` を開かせる（1 回だけ表示され、その場で消える）。
 
+発行は admin ポートのほか、公開側の認証付きエンドポイント `POST /api/drops` でもできる（遠隔 admin）。
+発行する側がホストの外にいるときはこちらを使う。認証は Bearer トークンで、サーバは
+その SHA-256 ハッシュ（検証子）しか持たない。遠隔でできるのは発行だけ（削除・一覧は無い）。
+
 ## エンドポイント
 
 ### 公開側（`DROP_PUBLIC_ADDR`、nginx から中継する）
@@ -57,6 +61,17 @@ VM 側                         drop                         ブラウザ側
 - `take` の値は `1` だけ。`take=0` や `take` の重複は 404。`take` 以外のクエリは無視する。
 - ブラウザの textarea は改行を CRLF にして送る。値は送られたまま保存・返却する（trim しない）。
 
+#### 遠隔 admin（公開側の認証付き発行）
+
+| リクエスト | 応答 |
+|---|---|
+| `POST /api/drops`（`Authorization: Bearer <token>`、`Content-Type: application/json`） | 201（発行。本体は admin の発行と同じ）／認証失敗は 404 |
+
+- 認証は本文を読む前に `Authorization` ヘッダだけで行う。検証子が未設定なら常に 404（無効）。
+- 認証失敗は、資格情報の有無・正否を区別せず、他の未知パスと同じ 404 を返す。
+- ボディ（`text` の先入れ、`ttl_secs`）と応答の形式は `POST /admin/drops` と同じ。
+- 遠隔でできるのは発行だけ。削除と一覧は無い（削除は loopback admin のみ）。
+
 ### admin 側（`DROP_ADMIN_ADDR`、nginx から中継しない）
 
 公開側とは別の loopback ポート。公開ポート側に admin ルートは存在しない
@@ -82,6 +97,7 @@ VM 側                         drop                         ブラウザ側
 - **値の二重読み出し。** take は 1 回で削除する。誰かに先に取られた場合、正規の受け手は 404 になるので **気付ける**（防げはしない。下記）。
 - **上書き。** 書き込みは 1 回だけ（2 回目は 410）。先入れしたドロップも公開側からは上書きできない。
 - **公開経路からの admin 操作。** admin は別ポート・別ルータで、公開ルータには admin ルートが無い。nginx も admin ポートへ中継しない。両ポートとも loopback 以外での待ち受けは起動時に拒否する。
+- **遠隔 admin の資格情報。** サーバは Bearer トークンの平文を持たず、SHA-256 ハッシュ（検証子）だけを保持して定数時間で照合する。検証子から平文は復元できず、平文が漏れてもできるのは発行だけ（既存ドロップの読み・削除はできない）。ローテーションと失効は検証子の差し替えで完結する。
 - **投稿内容による XSS。** 値は `text/plain` でしか返さず、フォームページにも出さない。全応答に `Content-Security-Policy: default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`、`X-Content-Type-Options: nosniff`、`Cache-Control: no-store`、`Referrer-Policy: no-referrer` を付ける。HTML は静的文字列で JS なし。
 - **長期残留。** TTL（既定 10 分、上限は設定）で消え、プロセスが止まれば全部消える。ディスクには書かない（サンプルの systemd unit は swap・コアダンプも止める）。
 - **ログへの混入。** サービスは本文・トークン・設定値をログに出さない（リクエストログも取らない）。サンプルの nginx 設定はボディを記録せず、ディスクの一時ファイルにも書かせない。
@@ -93,6 +109,7 @@ VM 側                         drop                         ブラウザ側
 - **`?take=1` 付き URL の扱い。** リンクプレビューやクローラが take URL を GET すると、その時点で値は消費される。take URL はチャット等に貼らない（貼るのはフォームの URL だけ）。フォームの URL は GET しても値を消費しない。
 - **送り手の真正性。** トークンを持っていれば誰でも書き込める。受け手は「正しい相手が書いた」ことをこのサービスからは確認できない。
 - **端末側・ホスト側の侵害。** 送り手／受け手のエージェントやブラウザ、TLS を終端する nginx、ホストの root はすべて値を見られる。メモリ上の値は解放時にゼロ化していない（HTTP スタックのバッファにもコピーが残りうる）。
+- **遠隔 admin の平文トークンの漏洩。** 漏れた平文を持つ者は、正規の発行者に成り代わってドロップを発行できる（先入れした偽の値の投稿、件数・容量の枯渇）。上限（1000 件・合計 1 MiB）で被害は頭打ちになるが、正規の発行も 503 で巻き込まれる。気付いたら検証子を差し替えて失効させる。
 - **可用性。** 再起動で全部消える。上限到達時は 503。レート制限は持たない（必要なら nginx 側で）。
 
 ## 使い方（curl）
@@ -125,6 +142,10 @@ jq -Rs '{text: ., ttl_secs: 300}' < value-file \
 
 # 明示破棄（204 / 404）
 curl -sS -o /dev/null -w '%{http_code}\n' -X DELETE "$ADMIN/admin/drops/$TOKEN"
+
+# 遠隔発行（ホストの外から）。トークンはプロセス引数に出さないよう curl の設定ファイル経由で渡す
+printf 'header = "Authorization: Bearer %s"\n' "$DROP_ADMIN_TOKEN" > /tmp/drop-curlrc && chmod 600 /tmp/drop-curlrc
+curl -sS -K /tmp/drop-curlrc -X POST -H 'Content-Type: application/json' -d '{}' https://drop.duxca.com/api/drops
 ```
 
 ## 設定
@@ -139,6 +160,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X DELETE "$ADMIN/admin/drops/$TOKEN"
 | `DROP_MAX_TTL_SECS` | `3600` | `ttl_secs` の上限（秒） |
 | `DROP_MAX_DROPS` | `1000` | 同時に存在できるドロップ数（未投稿を含む） |
 | `DROP_MAX_TOTAL_BYTES` | `1048576` | 預かり中の本文の合計（UTF-8 バイト）。4096 以上 |
+| `DROP_REMOTE_ADMIN_TOKEN_SHA256S` | （未設定 = 無効） | 遠隔 admin の検証子。Bearer トークンの SHA-256 ハッシュ（16 進 64 字）をカンマ区切りで最大 8 個。形式が違うと起動を拒否する |
 | `RUST_LOG` | `info` | tracing のフィルタ |
 
 固定値: 本文 1024 字、リクエストボディ 16 KiB、期限切れの定期パージ 30 秒ごと（アクセス時にも遅延削除する）。
@@ -152,9 +174,9 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X DELETE "$ADMIN/admin/drops/$TOKEN"
 
 - `deploy/drop.service` — systemd unit。`DynamicUser`、loopback 待ち受け、swap・コアダンプ無効化、サンドボックス設定。
 - `deploy/drop.duxca.com.nginx.conf` — nginx vhost。公開ポートへの中継のみ、`/admin` は 404、ボディ 16 KiB、ログはパスまで。
-- `deploy/install.sh` — `sudo ./install.sh <staging-dir>`。staging-dir に `drop`（バイナリ）と `drop.service`、任意で `runtime.env` を置く。変更があったときだけ再起動し、公開ポートで `/` と `/admin/drops` が 404 になることを確認する。nginx には触らない。
+- `deploy/install.sh` — `sudo ./install.sh <staging-dir>`。staging-dir に `drop`（バイナリ）と `drop.service`、任意で `runtime.env` と `admin-hashes.env`（遠隔 admin の検証子）を置く。変更があったときだけ再起動し、公開ポートで `/` と `/admin/drops` と無認証の `/api/drops` が 404 になることを確認する。`admin-hashes.env` は反映前に形式を検証し（不正なら既存の設定に触れない）、確認に失敗したら直前のファイル一式へ戻す。nginx には触らない。
 
-admin ポートは nginx からもトンネルからも出さない。admin を叩くのは同じホスト上のプロセスだけにする。
+admin ポートは nginx からもトンネルからも出さない。admin を叩くのは同じホスト上のプロセスだけにする。ホストの外からの発行は、検証子で守った `POST /api/drops` を使う。
 
 ## 開発・テスト
 

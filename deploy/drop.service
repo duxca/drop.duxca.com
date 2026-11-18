@@ -1,6 +1,7 @@
 # drop の systemd unit（汎用サンプル）。install.sh が /etc/systemd/system/ に置く。
 # 待ち受けは両方 loopback。公開ポートだけを nginx から中継し、admin ポートは中継しない。
-# 設定を変えるときは /etc/drop/runtime.env に DROP_* を書く（README の設定一覧を参照）。秘密は不要。
+# 設定を変えるときは /etc/drop/runtime.env に DROP_* を書く（README の設定一覧を参照）。
+# 遠隔 admin の検証子は /etc/drop/admin-hashes.env（デプロイが GitHub Secret から配る。平文は置かない）。
 # 再起動すると預かり中のドロップは全部消える（仕様）。
 
 [Unit]
@@ -15,6 +16,7 @@ Environment=DROP_PUBLIC_ADDR=127.0.0.1:8470
 Environment=DROP_ADMIN_ADDR=127.0.0.1:8471
 Environment=RUST_LOG=info
 EnvironmentFile=-/etc/drop/runtime.env
+EnvironmentFile=-/etc/drop/admin-hashes.env
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=10

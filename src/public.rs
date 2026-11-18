@@ -1,29 +1,109 @@
 //! 公開側（`https://drop.duxca.com/<token>`）。トークン自体が capability。
 //!
-//! admin ルートはここに絶対に入れない。nginx 中継後の送信元も loopback になるため、
+//! loopback admin のルートはここに入れない。nginx 中継後の送信元も loopback になるため、
 //! 送信元 IP では公開と admin を区別できない。区別は待ち受けポート（= 別の Router）だけで行う。
+//! 例外は遠隔 admin の発行（`POST /api/drops`）だけで、場所ではなく資格情報
+//! （Bearer トークンの SHA-256 検証子）で守る。認証は本文を読む前にヘッダだけで行い、
+//! 失敗は他の未知パスと同じ 404 を返す。
 
+use crate::admin::{issue_drop, IssueRequest};
 use crate::store::{FillError, Status, TakeError, TextError, MAX_TEXT_CHARS};
 use crate::token::Token;
 use crate::web::{
     escape_html, not_found, not_found_handler, plain, security_headers, token_in_path, AppState,
-    MAX_BODY_BYTES,
+    RemoteAdminKey, MAX_BODY_BYTES,
 };
-use axum::extract::rejection::FormRejection;
+use axum::extract::rejection::{FormRejection, JsonRejection};
 use axum::extract::{DefaultBodyLimit, FromRequest, Request, State};
-use axum::http::{header, Method, StatusCode, Uri};
+use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
+use axum::middleware::Next;
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::any;
-use axum::{middleware, Form, Router};
+use axum::routing::{any, post};
+use axum::{middleware, Extension, Form, Json, Router};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tokio::time::Instant;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/{token}", any(dispatch))
+        .route(
+            "/api/drops",
+            post(remote_issue)
+                .route_layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    require_remote_admin,
+                ))
+                .fallback(not_found_handler),
+        )
         .fallback(not_found_handler)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::map_response(security_headers))
         .with_state(state)
+}
+
+/// 遠隔 admin の認証。Authorization ヘッダだけを見て、本文は読まない。
+/// 検証子が未設定なら常に 404（遠隔 admin 無効）。
+async fn require_remote_admin(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let fingerprint = bearer_token(request.headers()).and_then(|token| {
+        let digest = Sha256::digest(token.as_bytes());
+        state
+            .remote_admin_hashes()
+            .iter()
+            .find(|hash| bool::from(digest.ct_eq(*hash)))
+            .map(|hash| {
+                hash[..4]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            })
+    });
+    match fingerprint {
+        Some(fingerprint) => {
+            request.extensions_mut().insert(RemoteAdminKey(fingerprint));
+            next.run(request).await
+        }
+        None => {
+            // 資格情報の有無・正否は応答では区別しない。本文もトークンもログに出さない。
+            tracing::debug!("remote admin authentication failed");
+            not_found()
+        }
+    }
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+    let token = token.trim();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token.to_string())
+    }
+}
+
+/// 認証済みの遠隔発行。本文の形式と発行条件は loopback admin と同じ。
+async fn remote_issue(
+    State(state): State<AppState>,
+    Extension(key): Extension<RemoteAdminKey>,
+    body: Result<Json<IssueRequest>, JsonRejection>,
+) -> Response {
+    let request = match body {
+        Ok(Json(request)) => request,
+        Err(rejection) => return plain(rejection.status(), "invalid request\n"),
+    };
+    let response = issue_drop(&state, request);
+    if response.status() == StatusCode::CREATED {
+        tracing::info!(key_fingerprint = %key.0, "remote drop issued");
+    }
+    response
 }
 
 /// GET と POST だけを受ける。それ以外は 404（405 や Allow ヘッダも返さない）。

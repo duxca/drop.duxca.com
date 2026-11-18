@@ -36,7 +36,10 @@ async fn main() -> anyhow::Result<()> {
 
     // 設定値・本文・トークンはログに出さない。
     let config = Config::from_env()?;
-    let state = AppState::new(Store::new(config.limits()));
+    let state = AppState::with_remote_admin_hashes(
+        Store::new(config.limits()),
+        config.remote_admin_hashes(),
+    );
 
     let public_listener = tokio::net::TcpListener::bind(config.public_addr).await?;
     let admin_listener = tokio::net::TcpListener::bind(config.admin_addr).await?;

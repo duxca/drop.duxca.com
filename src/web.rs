@@ -16,17 +16,33 @@ const CONTENT_SECURITY_POLICY: &str =
 /// 単一スレッド（current_thread）で動かすが、axum のハンドラは Send を要求するので Mutex で包む。
 /// ロックは await をまたがない。
 #[derive(Clone)]
-pub struct AppState(Arc<Mutex<Store>>);
+pub struct AppState {
+    store: Arc<Mutex<Store>>,
+    /// 遠隔 admin の検証子（Bearer トークンの SHA-256）。空なら遠隔 admin は無効。
+    remote_admin_hashes: Arc<Vec<[u8; 32]>>,
+}
 
 impl AppState {
-    pub fn new(store: Store) -> Self {
-        Self(Arc::new(Mutex::new(store)))
+    pub fn with_remote_admin_hashes(store: Store, remote_admin_hashes: Vec<[u8; 32]>) -> Self {
+        Self {
+            store: Arc::new(Mutex::new(store)),
+            remote_admin_hashes: Arc::new(remote_admin_hashes),
+        }
     }
 
     pub fn store(&self) -> MutexGuard<'_, Store> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.store.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub fn remote_admin_hashes(&self) -> &[[u8; 32]] {
+        &self.remote_admin_hashes
     }
 }
+
+/// 遠隔 admin の認証を通ったときにミドルウェアがリクエストへ積む、
+/// 使われた検証子の指紋（ハッシュ先頭 4 バイトの 16 進）。ログ用で、資格情報そのものではない。
+#[derive(Clone)]
+pub struct RemoteAdminKey(pub String);
 
 /// `prefix` の直後がちょうど正規形のトークンであるパスだけを受け付ける。
 /// パーセントデコード前の生のパスで判定する。

@@ -36,6 +36,17 @@ jobs:
         umask 077
         mkdir -p stage
         cp target/x86_64-unknown-linux-musl/release/drop deploy/drop.service deploy/install.sh stage/
+    - name: Stage remote-admin token hashes
+      env:
+        ADMIN_TOKEN_SHA256S: ${{ secrets.DROP_REMOTE_ADMIN_TOKEN_SHA256S }}
+      run: |
+        umask 077
+        if [ -n "$ADMIN_TOKEN_SHA256S" ]; then
+          printf 'DROP_REMOTE_ADMIN_TOKEN_SHA256S=%s\n' "$ADMIN_TOKEN_SHA256S" > stage/admin-hashes.env
+        else
+          # Secret が空 = 遠隔 admin を全失効させる（サービス自体は落とさない）
+          printf '# remote admin disabled: no token hashes configured\n' > stage/admin-hashes.env
+        fi
     - name: Install cloudflared
       run: |
         curl -fsSL -o /tmp/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
@@ -61,8 +72,9 @@ jobs:
         for i in $(seq 12); do
           root=$(code https://drop.duxca.com/)
           unknown=$(code https://drop.duxca.com/AAAAAAAAAAAAAAAAAAAAAA)
-          echo "try $i: GET /=$root GET /<unknown>=$unknown"
-          if [ "$root" = 404 ] && [ "$unknown" = 404 ]; then exit 0; fi
+          api=$(code -X POST -H 'Content-Type: application/json' -d '{}' https://drop.duxca.com/api/drops)
+          echo "try $i: GET /=$root GET /<unknown>=$unknown POST /api/drops (no auth)=$api"
+          if [ "$root" = 404 ] && [ "$unknown" = 404 ] && [ "$api" = 404 ]; then exit 0; fi
           sleep 5
         done
         exit 1

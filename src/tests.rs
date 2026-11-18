@@ -36,7 +36,7 @@ impl Harness {
     }
 
     fn with_limits(limits: Limits) -> Self {
-        let state = AppState::new(Store::new(limits));
+        let state = AppState::with_remote_admin_hashes(Store::new(limits), Vec::new());
         Self {
             public: public::router(state.clone()),
             admin: admin::router(state.clone()),
@@ -91,6 +91,34 @@ impl Harness {
             &format!("/admin/drops/{token}"),
         ))
         .await
+    }
+
+    /// 遠隔 admin 用の検証子を持つハーネス。引数は平文トークン（テスト用）。
+    fn with_remote_admin(plain_tokens: &[&str]) -> Self {
+        use sha2::{Digest, Sha256};
+        let hashes: Vec<[u8; 32]> = plain_tokens
+            .iter()
+            .map(|t| Sha256::digest(t.as_bytes()).into())
+            .collect();
+        let state = AppState::with_remote_admin_hashes(Store::new(default_limits()), hashes);
+        Self {
+            public: public::router(state.clone()),
+            admin: admin::router(state.clone()),
+            state,
+        }
+    }
+
+    async fn remote_issue(&self, authorization: Option<&str>, body: &str) -> Reply {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri("/api/drops")
+            .header(header::HOST, PUBLIC_HOST)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(value) = authorization {
+            builder = builder.header(header::AUTHORIZATION, value);
+        }
+        self.public(builder.body(Body::from(body.to_string())).unwrap())
+            .await
     }
 }
 
@@ -752,4 +780,108 @@ async fn logs_never_contain_text_or_token() {
     for token in [&posted, &prefilled, &too_long] {
         assert!(!logs.contains(token.as_str()), "{logs}");
     }
+}
+
+// ---- 遠隔 admin（公開側 POST /api/drops） ----
+
+const REMOTE_TOKEN: &str = "test-remote-admin-token-not-a-real-secret";
+const REMOTE_TOKEN_2: &str = "test-remote-admin-token-2-not-a-real-secret";
+
+#[tokio::test]
+async fn remote_issue_disabled_without_hashes() {
+    // 検証子が未設定なら、正しい形式のヘッダでも 404（遠隔 admin 無効）
+    let h = Harness::new();
+    let reply = h
+        .remote_issue(Some(&format!("Bearer {REMOTE_TOKEN}")), "{}")
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    assert_eq!(h.state.store().len(), 0);
+}
+
+#[tokio::test]
+async fn remote_issue_requires_valid_bearer_token() {
+    let h = Harness::with_remote_admin(&[REMOTE_TOKEN]);
+    // ヘッダなし
+    assert_eq!(
+        h.remote_issue(None, "{}").await.status,
+        StatusCode::NOT_FOUND
+    );
+    // 違うトークン
+    assert_eq!(
+        h.remote_issue(Some("Bearer wrong-token"), "{}")
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    // スキームが違う
+    assert_eq!(
+        h.remote_issue(Some(&format!("Basic {REMOTE_TOKEN}")), "{}")
+            .await
+            .status,
+        StatusCode::NOT_FOUND
+    );
+    // トークンが空
+    assert_eq!(
+        h.remote_issue(Some("Bearer "), "{}").await.status,
+        StatusCode::NOT_FOUND
+    );
+    // どれも発行されていない
+    assert_eq!(h.state.store().len(), 0);
+}
+
+#[tokio::test]
+async fn remote_issue_auth_precedes_body_parsing() {
+    // 認証が先。資格情報が違えば、本文が壊れていても 400 ではなく 404
+    let h = Harness::with_remote_admin(&[REMOTE_TOKEN]);
+    let reply = h
+        .remote_issue(Some("Bearer wrong-token"), "{not json")
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    // 正しい資格情報なら本文のエラーが返る
+    let reply = h
+        .remote_issue(Some(&format!("Bearer {REMOTE_TOKEN}")), "{not json")
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn remote_issue_full_flow_and_second_hash() {
+    let h = Harness::with_remote_admin(&[REMOTE_TOKEN, REMOTE_TOKEN_2]);
+    // 2 本目の検証子（ローテーションの重ね期間）でも発行できる
+    let reply = h
+        .remote_issue(Some(&format!("Bearer {REMOTE_TOKEN_2}")), "{}")
+        .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert_security_headers(&reply);
+    let json: Value = serde_json::from_str(&reply.body).unwrap();
+    let token = json["token"].as_str().unwrap().to_string();
+
+    // 発行したドロップは公開側の通常の流れで使える
+    assert_eq!(h.show(&token).await.status, StatusCode::OK);
+    assert_eq!(h.submit(&token, "via-remote").await.status, StatusCode::OK);
+    let taken = h.take(&token).await;
+    assert_eq!(taken.status, StatusCode::OK);
+    assert_eq!(taken.body, "via-remote");
+
+    // 先入れ発行もできる
+    let reply = h
+        .remote_issue(
+            Some(&format!("Bearer {REMOTE_TOKEN}")),
+            &json!({"text": "prefilled", "ttl_secs": 60}).to_string(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CREATED);
+    let json: Value = serde_json::from_str(&reply.body).unwrap();
+    assert_eq!(json["ttl_secs"], 60);
+    let token = json["token"].as_str().unwrap().to_string();
+    assert_eq!(h.take(&token).await.body, "prefilled");
+}
+
+#[tokio::test]
+async fn remote_issue_other_methods_are_404() {
+    let h = Harness::with_remote_admin(&[REMOTE_TOKEN]);
+    let reply = h.public(public_request(Method::GET, "/api/drops")).await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    let reply = h.public(public_request(Method::DELETE, "/api/drops")).await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
 }
